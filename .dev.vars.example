@@ -1,0 +1,3 @@
+ADMIN_PASSWORD="set-a-long-random-password"
+# Optional account-wide Analytics: Account / Account Analytics / Read
+# CF_ANALYTICS_TOKEN="read-only-token"

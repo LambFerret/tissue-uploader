@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tissue-uploader",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/healthz", "/admin"]
+  },
+  "d1_databases": [{ "binding": "DB", "database_name": "tissue-uploader", "migrations_dir": "migrations" }],
+  "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "tissue-uploader-photos" }],
+  "vars": {
+    "CF_ACCOUNT_ID": "7f32062fd88b8434a96359300224a33b",
+    "R2_BILLING_ANCHOR": "",
+    "R2_FREE_BYTES": "10000000000",
+    "R2_WARNING_BYTES": "9500000000",
+    "WORKERS_DAILY_LIMIT": "100000",
+    "D1_READ_DAILY_LIMIT": "5000000",
+    "D1_WRITE_DAILY_LIMIT": "100000",
+    "D1_STORAGE_LIMIT": "5000000000",
+    "R2_CLASS_A_MONTHLY_LIMIT": "1000000",
+    "R2_CLASS_B_MONTHLY_LIMIT": "10000000"
+  },
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 }
+}

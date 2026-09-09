@@ -1,0 +1,13 @@
+node_modules/
+data/
+.env
+.env.ec2
+test-results/
+playwright-report/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.wrangler/
+dist/
+coverage/
+cloud-test-results/

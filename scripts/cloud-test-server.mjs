@@ -1,0 +1,18 @@
+import {mkdtempSync,readFileSync,writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {spawn,spawnSync} from 'node:child_process';
+const root=process.cwd(),dir=mkdtempSync(path.join(tmpdir(),'tissue-cf-test-'));
+const config=JSON.parse(readFileSync('wrangler.jsonc','utf8'));
+config.main=path.join(root,config.main);config.assets.directory=path.join(root,'public');
+config.d1_databases[0].migrations_dir=path.join(root,'migrations');
+config.vars.ADMIN_PASSWORD='test-password-strong';config.triggers={crons:[]};
+config.observability={enabled:false};
+const cfg=path.join(dir,'wrangler.json');writeFileSync(cfg,JSON.stringify(config));
+const cli=path.join(root,'node_modules/wrangler/bin/wrangler.js'),shared=['--config',cfg,'--persist-to',path.join(dir,'state')];
+const migrated=spawnSync(process.execPath,[cli,'d1','migrations','apply','DB','--local',...shared],{stdio:'inherit',env:{...process.env,CI:'1'}});
+if(migrated.status!==0)process.exit(1);
+const seeded=spawnSync(process.execPath,[cli,'d1','execute','DB','--local','--file',path.join(root,'cloud-tests/seed.sql'),...shared],{stdio:'inherit',env:{...process.env,CI:'1'}});
+if(seeded.status!==0)process.exit(1);
+const dev=spawn(process.execPath,[cli,'dev','--port','3108',...shared],{stdio:'inherit'});
+process.on('SIGTERM',()=>dev.kill());process.on('SIGINT',()=>dev.kill());dev.on('exit',code=>process.exit(code||0));

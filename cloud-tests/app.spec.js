@@ -1,0 +1,57 @@
+import {test,expect} from '@playwright/test';
+import sharp from 'sharp';
+import {randomBytes,randomUUID,createHash} from 'node:crypto';
+import {writeFile,readFile} from 'node:fs/promises';
+import {ZipReader,Uint8ArrayReader,Uint8ArrayWriter} from '@zip.js/zip.js';
+test('30 originals, private photos, ZIP integrity, global usage and manual refresh',async({page,request},info)=>{
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const reservations=[];page.on('request',r=>{if(new URL(r.url()).pathname==='/api/uploads'&&r.method()==='POST')reservations.push(r.postDataJSON());});
+ const institution='검증치과-'+randomUUID().slice(0,8);
+ const image=await sharp(randomBytes(1600*1600*3),{raw:{width:1600,height:1600,channels:3}}).jpeg({quality:90}).toBuffer();
+ expect(image.length).toBeGreaterThan(1900000);
+ const files=[];for(let i=0;i<30;i++){const file=info.outputPath(`photo-${i}.jpg`);await writeFile(file,image);files.push(file);}
+ await page.goto('/');await page.getByRole('textbox',{name:'의료기관명',exact:true}).fill(institution);
+ await page.locator('#files').setInputFiles(files);await page.getByRole('button',{name:'업로드',exact:true}).click();
+ await expect(page.locator('.queue-item small').filter({hasText:'완료'})).toHaveCount(30,{timeout:90000});
+ await expect(page.locator('.my-photos .photo-card')).toHaveCount(30);
+ const visitor=await page.evaluate(()=>localStorage.getItem('moa-visitor'));
+ const mine=await (await request.get('/api/photos/mine',{headers:{'X-Visitor-Id':visitor}})).json();
+ const original=await request.get(`/api/photos/${mine.photos[0].id}/original`,{headers:{'X-Visitor-Id':visitor}});
+ expect(createHash('sha256').update(await original.body()).digest('hex')).toBe(createHash('sha256').update(image).digest('hex'));
+ const retried=await request.post('/api/uploads',{headers:{'X-Visitor-Id':visitor},data:reservations[0]});expect((await retried.json()).complete).toBe(true);
+ expect((await request.post(`/api/uploads/${reservations[0].id}/complete`,{headers:{'X-Visitor-Id':visitor}})).status()).toBe(201);
+ expect((await(await request.get('/api/photos/mine',{headers:{'X-Visitor-Id':visitor}})).json()).total).toBe(30);
+ expect((await request.get(`/api/photos/${mine.photos[0].id}/original`)).status()).toBe(401);
+ await page.goto('/admin');await page.getByRole('textbox',{name:'관리자 비밀번호'}).fill('test-password-strong');await page.getByRole('button',{name:'로그인',exact:true}).click();
+ await expect(page.locator('#cloud-usage')).toBeVisible();await expect(page.locator('[data-quota="r2-storage"]')).toContainText('원본 + 썸네일');
+ await expect(page.locator('[data-quota="workers-requests"]')).toContainText('미연결');
+ const total=await page.locator('#total').innerText(),bytes=await page.locator('#volume').innerText();
+ await page.locator('#filter-name').fill('일치하지않음');await page.getByRole('button',{name:'조회',exact:true}).click();
+ await expect(page.locator('.photo-card')).toHaveCount(0);await expect(page.locator('#total')).toHaveText(total);await expect(page.locator('#volume')).toHaveText(bytes);
+ let queries=0;page.on('request',r=>{if(r.url().includes('/api/admin/photos'))queries++;});
+ await page.waitForTimeout(5500);expect(queries).toBe(0);
+ await page.locator('#filter-name').fill('아직적용하지않은검색어');await page.getByRole('button',{name:'새로고침',exact:true}).click();await expect.poll(()=>queries).toBe(1);await expect(page.locator('.photo-card')).toHaveCount(0);
+ await page.locator('#filter-name').fill(institution);await page.getByRole('button',{name:'조회',exact:true}).click();await expect(page.locator('.photo-card')).toHaveCount(30);
+ await page.locator('[data-select]').first().check();
+ const downloadPromise=page.waitForEvent('download');await page.locator('#download').click();const download=await downloadPromise;
+ const zip=new ZipReader(new Uint8ArrayReader(await readFile(await download.path())));const entries=await zip.getEntries();expect(entries).toHaveLength(1);
+ const extracted=await entries[0].getData(new Uint8ArrayWriter(),{checkSignature:true});expect(Buffer.from(extracted)).toEqual(image);await zip.close();
+ await page.getByRole('button',{name:'로그아웃'}).click();await expect(page.locator('#login')).toBeVisible();expect(errors).toEqual([]);
+});
+test('rejects malformed images and foreign origins',async({request})=>{
+ const visitor=randomUUID(),id=randomUUID(),headers={'X-Visitor-Id':visitor};
+ const init=await request.post('/api/uploads',{headers,data:{id,institution:'형식검증치과',name:'bad.jpg',size:40,thumbSize:40,format:'jpeg',crc32:0}});expect(init.ok()).toBeTruthy();
+ const bad=await request.put(`/api/uploads/${id}/original`,{headers,data:Buffer.alloc(40,65)});expect(bad.status()).toBe(415);
+ expect((await request.post('/api/uploads',{headers:{...headers,Origin:'https://foreign.example'},data:{}})).status()).toBe(403);
+ expect((await request.post(`/api/uploads/${id}/complete`,{headers})).status()).toBe(409);
+});
+test('50,000 metadata rows: bounded pages, KST dates, institution sorting and totals',async({request})=>{
+ await request.post('/api/admin/login',{data:{password:'test-password-strong'}});
+ const first=await(await request.get('/api/admin/photos?institution=규모검증-')).json();
+ expect(first.total).toBe(50000);expect(first.pages).toBe(834);expect(first.photos).toHaveLength(60);
+ const last=await(await request.get('/api/admin/photos?institution=규모검증-&page=834')).json();expect(last.photos).toHaveLength(20);
+ const range=await(await request.get('/api/admin/photos?institution=규모검증-&from=2020-01-02&to=2020-01-03&sort=oldest')).json();
+ expect(range.total).toBe(2880);expect(range.photos[0].created).toBe('2020-01-01T15:00:00.000Z');expect(range.overall).toEqual(first.overall);
+ const names=await(await request.get('/api/admin/photos?institution=규모검증-&sort=institution-desc')).json();expect(names.photos.every(p=>p.nickname==='규모검증-099치과')).toBeTruthy();
+ const repeated=await(await request.get('/api/admin/photos?institution=규모검증-&sort=institution-desc')).json();expect(repeated).toMatchObject({photos:names.photos,total:50000});
+});

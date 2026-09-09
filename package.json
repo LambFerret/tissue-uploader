@@ -1,0 +1,40 @@
+{
+  "name": "tissue-uploader",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "playwright test",
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --watch --env-file-if-exists=.env server.js",
+    "cf:prepare": "node scripts/prepare-local.mjs && wrangler d1 migrations apply DB --local",
+    "cf:dev": "wrangler dev --port 8787",
+    "cf:types": "wrangler types",
+    "cf:check": "tsc --noEmit && wrangler deploy --dry-run",
+    "cf:deploy": "wrangler deploy",
+    "test:cloudflare": "playwright test --config playwright.cloudflare.config.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@zip.js/zip.js": "^2.13.1",
+    "archiver": "^8.0.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "multer": "^2.3.0",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.35.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/qrcode": "^1.5.6",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.130.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
