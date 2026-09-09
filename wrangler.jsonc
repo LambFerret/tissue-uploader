@@ -9,7 +9,7 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*", "/healthz", "/admin"]
   },
-  "d1_databases": [{ "binding": "DB", "database_name": "tissue-uploader", "migrations_dir": "migrations" }],
+  "d1_databases": [{ "binding": "DB", "database_name": "tissue-uploader", "database_id": "c4fe58ea-80b0-41c4-a0ee-1cf124858409", "migrations_dir": "migrations" }],
   "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "tissue-uploader-photos" }],
   "vars": {
     "CF_ACCOUNT_ID": "7f32062fd88b8434a96359300224a33b",

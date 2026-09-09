@@ -1,6 +1,7 @@
 import QRCode from 'qrcode';
 import { collectUsage, usage, type AppEnv } from './usage';
 import { archive } from './zip';
+import { cleanDeletedPhotos } from './deletion';
 type Photo={id:string;owner:string;nickname:string;name:string;size:number;thumb_size:number;crc32:number;format:string;created:string;status?:string};
 type Totals={total:number;institutions:number;bytes:number;r2_bytes:number;revision:number};
 class Failure extends Error { constructor(public status:number,message:string){super(message);} }
@@ -53,13 +54,23 @@ function imageFormat(bytes:Uint8Array){
  if(text.slice(4,8)==='ftyp'&&/avif|avis/.test(text.slice(8)))return 'avif';
  return null;
 }
+async function recordObject(env:AppEnv,id:string,key:string,size:number){
+ await env.DB.prepare('INSERT OR IGNORE INTO objects(key,size) VALUES(?,?)').bind(key,size).run();
+ // An old PUT may finish after admin deletion. It must not recreate stored bytes.
+ if(await env.DB.prepare('SELECT id FROM deleted_uploads WHERE id=?').bind(id).first()){
+  await env.DB.prepare('INSERT OR IGNORE INTO deletion_jobs(id) VALUES(?)').bind(id).run();
+  try{await env.PHOTOS.delete(key);await env.DB.prepare('DELETE FROM objects WHERE key=?').bind(key).run();}
+  catch{console.warn(JSON.stringify({event:'late_upload_cleanup_pending'}));}
+  fail(410,'관리자가 삭제한 사진입니다.');
+ }
+}
 async function uploadPart(req:Request,env:AppEnv,p:Photo,thumb:boolean){
  const expected=thumb?p.thumb_size:p.size,key=thumb?`thumbs/${p.id}.jpg`:`originals/${p.id}`;
  if(p.status==='complete')return json({ok:true});
  if(Date.parse(p.created)<Date.now()-86400000)fail(410,'업로드 시간이 만료되었습니다. 파일을 다시 선택해주세요.');
  if(!req.body || Number(req.headers.get('content-length'))!==expected)fail(400,'사진 크기가 일치하지 않습니다. 다시 시도해주세요.');
  const prior=await env.PHOTOS.head(key);
- if(prior){if(prior.size!==expected)fail(409,'저장된 사진 크기가 다릅니다.');await req.body!.cancel();await env.DB.prepare('INSERT OR IGNORE INTO objects(key,size) VALUES(?,?)').bind(key,prior.size).run();return json({ok:true});}
+ if(prior){if(prior.size!==expected)fail(409,'저장된 사진 크기가 다릅니다.');await req.body!.cancel();await recordObject(env,p.id,key,prior.size);return json({ok:true});}
  const reader=req.body!.getReader();const initial:Uint8Array[]=[];let length=0;
  while(length<32){const v=await reader.read();if(v.done)break;initial.push(v.value);length+=v.value.length;}
  const prefix=new Uint8Array(Math.min(length,64));let at=0;for(const v of initial){const take=v.subarray(0,prefix.length-at);prefix.set(take,at);at+=take.length;if(at===prefix.length)break;}
@@ -72,7 +83,7 @@ async function uploadPart(req:Request,env:AppEnv,p:Photo,thumb:boolean){
  const object=outcomes[1].status==='fulfilled'?outcomes[1].value:null;
  const existing=object;
  if(!existing||existing.size!==expected)fail(503,'사진을 저장하지 못했습니다. 재시도를 눌러주세요.');
- await env.DB.prepare('INSERT OR IGNORE INTO objects(key,size) VALUES(?,?)').bind(key,existing!.size).run();
+ await recordObject(env,p.id,key,existing!.size);
  return json({ok:true});
 }
 async function route(req:Request,env:AppEnv,ctx:ExecutionContext):Promise<Response>{
@@ -95,6 +106,14 @@ async function route(req:Request,env:AppEnv,ctx:ExecutionContext):Promise<Respon
   await admin(req,env);
   if(path==='/api/admin/session'&&method==='GET')return json({ok:true});
   if(path==='/api/admin/photos'&&method==='GET')return json(await list(env,url.searchParams));
+  if(path==='/api/admin/photos'&&method==='DELETE'){
+   const input=await body(req);
+   if(!Array.isArray(input.ids)||input.ids.length<1||input.ids.length>60||input.ids.some((id:unknown)=>!uuid(id)))fail(400,'삭제할 사진을 1~60장 선택해주세요.');
+   const ids=[...new Set<string>(input.ids)];
+   const removed=await env.DB.prepare(`DELETE FROM photos WHERE id IN (${ids.map(()=>'?').join(',')}) RETURNING id`).bind(...ids).all<{id:string}>();
+   const cleaned=await cleanDeletedPhotos(env,ids);
+   return json({deleted:removed.results.length,cleanupPending:!cleaned},cleaned?200:202);
+  }
   if((path==='/api/admin/download'||path==='/api/admin/download-plan')&&['GET','POST'].includes(method)){
    const q=method==='POST'?new URLSearchParams(await smallBody(req)):url.searchParams;
    const {where,args,order}=filters(q);
@@ -111,8 +130,9 @@ async function route(req:Request,env:AppEnv,ctx:ExecutionContext):Promise<Respon
   const own=await owner(req),v=await body(req),name=String(v.institution||'').trim();
   if(!uuid(v.id)||!name||name.length>100||!Number.isInteger(v.size)||v.size<1||v.size>30*1048576||!Number.isInteger(v.thumbSize)||v.thumbSize<1||v.thumbSize>2*1048576||!Number.isInteger(v.crc32)||v.crc32<0||v.crc32>0xffffffff||!['jpeg','png','webp','gif','avif'].includes(v.format))fail(400,'사진 또는 의료기관명 정보가 잘못되었습니다.');
   const filename=String(v.name||'photo').replace(/[\\/\x00-\x1f]/g,'_').slice(0,200);
-  await env.DB.prepare('INSERT OR IGNORE INTO uploads(id,owner,nickname,name,size,thumb_size,crc32,format,created) VALUES(?,?,?,?,?,?,?,?,?)').bind(v.id,own,name,filename,v.size,v.thumbSize,v.crc32,v.format,new Date().toISOString()).run();
+  await env.DB.prepare('INSERT OR IGNORE INTO uploads(id,owner,nickname,name,size,thumb_size,crc32,format,created) SELECT ?,?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM deleted_uploads WHERE id=?)').bind(v.id,own,name,filename,v.size,v.thumbSize,v.crc32,v.format,new Date().toISOString(),v.id).run();
   const p=await env.DB.prepare('SELECT * FROM uploads WHERE id=?').bind(v.id).first<Photo>();
+  if(!p)fail(410,'관리자가 삭제한 사진입니다. 다시 올리려면 파일을 새로 선택해주세요.');
   if(p!.owner!==own||p!.size!==v.size||p!.crc32!==v.crc32||p!.nickname!==name||p!.thumb_size!==v.thumbSize)fail(409,'업로드 정보가 변경되었습니다. 파일을 다시 선택해주세요.');return json({id:v.id,complete:p!.status==='complete'});
  }
  const upload=path.match(/^\/api\/uploads\/([a-f0-9-]{36})\/(original|thumb|complete)$/);
@@ -137,6 +157,7 @@ async function route(req:Request,env:AppEnv,ctx:ExecutionContext):Promise<Respon
  return fail(404,'요청한 주소를 찾을 수 없습니다.');
 }
 export async function maintenance(env:AppEnv){
+ await cleanDeletedPhotos(env);
  await collectUsage(env);
  const old=await env.DB.prepare("SELECT id FROM uploads WHERE status='pending' AND created<? LIMIT 20").bind(new Date(Date.now()-2*86400000).toISOString()).all<{id:string}>();
  for(const p of old.results){const keys=[`originals/${p.id}`,`thumbs/${p.id}.jpg`];await env.PHOTOS.delete(keys);await env.DB.batch([env.DB.prepare('DELETE FROM objects WHERE key IN (?,?)').bind(...keys),env.DB.prepare("DELETE FROM uploads WHERE id=? AND status='pending'").bind(p.id)]);}

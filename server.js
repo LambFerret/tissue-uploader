@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { moveFile, removeFile } from './lib/files.js';
+import { moveFile, removeFile, removeStoredFile } from './lib/files.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +32,17 @@ db.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS photos (
  CREATE INDEX IF NOT EXISTS photos_created_id ON photos(created,id);
  CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL);`);
 const app = express();
+db.exec('CREATE TABLE IF NOT EXISTS deleted_requests (id TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS deletion_jobs (id TEXT PRIMARY KEY);');
+async function cleanDeletedPhotos() {
+ const jobs=db.prepare('SELECT id FROM deletion_jobs LIMIT 60').all();
+ let pending=false;
+ for(const {id} of jobs)try{
+  await removeStoredFile(path.join(data,'originals',id));await removeStoredFile(path.join(data,'thumbs',id+'.jpg'));
+  db.prepare('DELETE FROM deletion_jobs WHERE id=?').run(id);
+ }catch{pending=true;console.warn('Photo deletion cleanup pending');}
+ return !pending;
+}
+const deletionTimer=setInterval(()=>{cleanDeletedPhotos().catch(error=>console.error('Deletion cleanup failed',error.code));},60000);deletionTimer.unref();
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 app.use(helmet({ referrerPolicy: { policy: 'same-origin' }, contentSecurityPolicy: { directives: { 'img-src': ["'self'", 'blob:', 'data:'], 'script-src': ["'self'"], 'upgrade-insecure-requests': null } } }));
 app.use(express.json({ limit: '16kb' }));
@@ -78,6 +89,7 @@ app.post('/api/photos', owner, upload.single('photo'), async (req, res, next) =>
   if (!file || !nickname || nickname.length > 100) return res.status(400).json({ error: '사진과 1~100자의 의료기관명을 입력해주세요.' });
   const requestId = String(req.body.requestId || '');
   if (!/^[a-f0-9-]{36}$/.test(requestId)) return res.status(400).json({ error: '업로드 요청 정보가 잘못되었습니다.' });
+  if(db.prepare('SELECT id FROM deleted_requests WHERE id=?').get(requestId))return res.status(410).json({error:'관리자가 삭제한 사진입니다. 다시 올리려면 파일을 새로 선택해주세요.'});
   const previous = db.prepare('SELECT * FROM photos WHERE request_id=? AND owner=?').get(requestId, req.owner);
   if (previous) return res.json(previous);
   // Decode bytes, not the path: libvips' file cache can lock the input on Windows.
@@ -91,6 +103,9 @@ app.post('/api/photos', owner, upload.single('photo'), async (req, res, next) =>
   } catch (error) { error.code ||= 'IMAGE_DECODE_FAILED'; throw error; }
   await moveFile(file.path, original);
   const photo = { id, owner: req.owner, nickname, name: String(req.body.name || file.originalname).replace(/[\\/\x00-\x1f]/g, '_').slice(0, 200), size: file.size, created: new Date().toISOString(), format: metadata.format, request_id: requestId };
+  if(db.prepare('SELECT id FROM deleted_requests WHERE id=?').get(requestId)){
+   await removeFile(original);await removeFile(thumb);return res.status(410).json({error:'관리자가 삭제한 사진입니다.'});
+  }
   db.prepare('INSERT INTO photos VALUES (@id,@owner,@nickname,@name,@size,@created,@format,@request_id)').run(photo);
   res.status(201).json(photo);
  } catch (error) { if (original) await removeFile(original); if (thumb) await removeFile(thumb); next(error); }
@@ -127,6 +142,23 @@ app.get('/api/photos/mine', owner, (req, res) => res.json(photoPage(req.query, r
 app.get('/api/admin/photos', admin, (req, res) => {
  const overall = db.prepare('SELECT count(*) AS total, count(DISTINCT nickname) AS institutions, coalesce(sum(size),0) AS bytes FROM photos').get();
  res.json({ ...photoPage(req.query), overall });
+});
+app.delete('/api/admin/photos', admin, async (req,res,next)=>{
+ try{
+  const values=req.body?.ids;
+  if(!Array.isArray(values)||!values.length||values.length>60||values.some(id=>typeof id!=='string'||!/^[a-f0-9-]{36}$/.test(id)))return res.status(400).json({error:'삭제할 사진을 1~60장 선택해주세요.'});
+  const ids=[...new Set(values)];let deleted=0;
+  db.exec('BEGIN IMMEDIATE');
+  try{
+   for(const id of ids){const p=db.prepare('SELECT request_id FROM photos WHERE id=?').get(id);if(!p)continue;
+    if(p.request_id)db.prepare('INSERT OR IGNORE INTO deleted_requests(id) VALUES(?)').run(p.request_id);
+    db.prepare('INSERT OR IGNORE INTO deletion_jobs(id) VALUES(?)').run(id);
+    db.prepare('DELETE FROM photos WHERE id=?').run(id);deleted++;
+   }
+   db.exec('COMMIT');
+  }catch(e){db.exec('ROLLBACK');throw e;}
+  const cleaned=await cleanDeletedPhotos();res.status(cleaned?200:202).json({deleted,cleanupPending:!cleaned});
+ }catch(e){next(e);}
 });
 app.all('/api/admin/download', admin, (req, res) => {
  if (!['GET', 'POST'].includes(req.method)) return res.sendStatus(405);

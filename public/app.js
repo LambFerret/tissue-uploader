@@ -61,6 +61,18 @@ function adminPage() { startAdminRefresh(); app.innerHTML = `<section class="int
 function filterParams() {return new URLSearchParams({institution:$('#filter-name').value.trim(),from:$('#filter-from').value,to:$('#filter-to').value,sort:$('#sort').value});}
 let adminRequest = 0, adminTimer, adminActive = false, adminLoading = false, adminCurrentPage = 1;
 let adminFilters = new URLSearchParams();
+let deletingPhotos=false;
+async function deleteSelectedPhotos() {
+ const ids=[...selected];if(!ids.length||deletingPhotos)return;
+ if(!confirm(`선택한 ${ids.length}장의 사진을 삭제할까요?\n원본과 썸네일이 삭제되며 복구할 수 없습니다.`))return;
+ deletingPhotos=true;updateSelection();
+ try {
+  const result=await api('/api/admin/photos',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});
+  selected.clear();await loadAdmin(adminCurrentPage,{useApplied:true});
+  toast(result.cleanupPending?`${result.deleted}장 삭제 · 저장 공간 정리 재시도 예정`:`${result.deleted}장 삭제 완료`);
+ }catch(e){if(e.status===401)loginPage();else toast(e.message);}
+ finally{deletingPhotos=false;if($('#delete-photos'))updateSelection();}
+}
 function stopAdminRefresh() { adminActive=false; clearInterval(adminTimer); }
 function startAdminRefresh() {
  stopAdminRefresh(); adminActive=true; adminLoading=false;
@@ -71,6 +83,7 @@ function refreshAdmin() {
 // Refresh only on explicit user action; avoid background requests against free quotas.
 async function loadAdmin(page = 1, {refresh = false, useApplied = false} = {}) {
  const actions = document.querySelector('.admin-actions');
+ if(actions && !$('#delete-photos')) { const button=document.createElement('button');button.className='secondary danger';button.id='delete-photos';button.textContent='선택 삭제';button.disabled=true;button.onclick=deleteSelectedPhotos;actions.append(button); }
  if(actions && !$('#admin-refresh')) { const button=document.createElement('button');button.className='secondary';button.id='admin-refresh';button.textContent='새로고침';button.onclick=()=>loadAdmin(adminCurrentPage,{refresh:true});actions.prepend(button); }
  const params = (refresh || useApplied) ? new URLSearchParams(adminFilters) : filterParams();
  const from=params.get('from'), to=params.get('to');
@@ -98,5 +111,5 @@ async function loadAdmin(page = 1, {refresh = false, useApplied = false} = {}) {
   else if(!refresh) toast(e.message);
  } finally { if(request===adminRequest) adminLoading=false; }
 }
-function updateSelection() { $('#selection-count').textContent=selected.size ? `· ${selected.size}장 선택` : ''; $('#select-all').checked=photos.length>0 && selected.size===photos.length;$('#select-all').indeterminate=selected.size>0 && selected.size<photos.length;$('#download').disabled=!photos.length;$('#download').textContent=selected.size ? `선택한 ${selected.size}장 다운로드 ↓` : '전체 ZIP 다운로드 ↓'; }
+function updateSelection() { if($('#delete-photos')){ $('#delete-photos').disabled=deletingPhotos||selected.size===0;$('#delete-photos').textContent=deletingPhotos?'삭제 중…':selected.size?`선택한 ${selected.size}장 삭제`:'선택 삭제'; } $('#selection-count').textContent=selected.size ? `· ${selected.size}장 선택` : ''; $('#select-all').checked=photos.length>0 && selected.size===photos.length;$('#select-all').indeterminate=selected.size>0 && selected.size<photos.length;$('#download').disabled=!photos.length;$('#download').textContent=selected.size ? `선택한 ${selected.size}장 다운로드 ↓` : '전체 ZIP 다운로드 ↓'; }
 isAdmin ? adminInit() : uploader();
