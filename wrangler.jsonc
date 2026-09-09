@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "tissue-uploader",
+  "preview_urls": false,
   "main": "worker/index.ts",
   "compatibility_date": "2026-09-09",
   "compatibility_flags": ["nodejs_compat"],
@@ -24,5 +25,5 @@
     "R2_CLASS_B_MONTHLY_LIMIT": "10000000"
   },
   "triggers": { "crons": ["*/15 * * * *"] },
-  "observability": { "enabled": true, "head_sampling_rate": 0.1 }
+  "observability": { "enabled": true, "head_sampling_rate": 0.1, "logs": { "head_sampling_rate": 0.1 }, "traces": { "head_sampling_rate": 0.1 } }
 }
