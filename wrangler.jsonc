@@ -14,7 +14,7 @@
   "r2_buckets": [{ "binding": "PHOTOS", "bucket_name": "tissue-uploader-photos" }],
   "vars": {
     "CF_ACCOUNT_ID": "7f32062fd88b8434a96359300224a33b",
-    "R2_BILLING_ANCHOR": "",
+    "R2_BILLING_ANCHOR": "2026-09-10T00:00:00Z",
     "R2_FREE_BYTES": "10000000000",
     "R2_WARNING_BYTES": "9500000000",
     "WORKERS_DAILY_LIMIT": "100000",
